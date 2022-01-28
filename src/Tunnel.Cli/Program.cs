@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.CommandLine;
+using System.Net.NetworkInformation;
 using Renci.SshNet;
 
 namespace Tunnel.Cli;
@@ -91,8 +92,8 @@ public class Program
         var forwards = new List<ForwardedPort>();
         try
         {
-            forwards.AddRange(parseForwardsLocal(localForwards));
-            forwards.AddRange(parseForwardsRemote(remoteForwards));
+            forwards.AddRange(parseForwardsLocal(splitCsv(localForwards)));
+            forwards.AddRange(parseForwardsRemote(splitCsv(remoteForwards)));
         }
         catch (Exception ex)
         {
@@ -175,24 +176,53 @@ public class Program
         };
     }
 
+    private static IEnumerable<string> GetAllNetworkInterfaces()
+    {
+        foreach(NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            var supportedTypes = new [] { NetworkInterfaceType.Wireless80211, NetworkInterfaceType.Ethernet, NetworkInterfaceType.Loopback };
+            if (ni.IsReceiveOnly) continue;
+            if (ni.OperationalStatus != OperationalStatus.Up) continue;
+            if (!supportedTypes.Contains(ni.NetworkInterfaceType)) continue;
+            foreach (UnicastIPAddressInformation ip in ni.GetIPProperties().UnicastAddresses)
+            {
+                if (ip.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                yield return ip.Address.ToString();
+            }
+        }
+    }
+    
+    private static IEnumerable<string> splitCsv(IEnumerable<string> strings) => strings.SelectMany(s => s.Split(",", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
     private static IEnumerable<ForwardedPortLocal> parseForwardsLocal(IEnumerable<string> forwardArgs)
     {
         string defaultLocal = "*";
         string defaultRemote = "127.0.0.1";
         foreach (var arg in forwardArgs)
         {
-            ForwardedPortLocal result;
+            var results = new List<ForwardedPortLocal>();
             try
             {
                 var (srcHost, srcPortNum, dstHost, dstPortNum) = parseForwardsInternal(defaultLocal, defaultRemote, arg);
-                result = (srcHost == defaultLocal) ? new ForwardedPortLocal(srcPortNum, dstHost, dstPortNum) : new ForwardedPortLocal(srcHost, srcPortNum, dstHost, dstPortNum);
+                
+                if (srcHost == defaultLocal)
+                {
+                    foreach (var ipAddress in GetAllNetworkInterfaces())
+                    {
+                        results.Add(new ForwardedPortLocal(ipAddress, srcPortNum, dstHost, dstPortNum));
+                    }
+                }
+                else
+                {
+                    results.Add(new ForwardedPortLocal(srcHost, srcPortNum, dstHost, dstPortNum));
+                }
             }
             catch (Exception ex)
             {
                 throw new Exception($"Unable to parse '{arg}' as a forwarding rule because {ex.Message}");
             }
 
-            yield return result;
+            foreach (var result in results) yield return result;            
         }
     }
 
